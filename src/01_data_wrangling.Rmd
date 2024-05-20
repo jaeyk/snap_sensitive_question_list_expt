@@ -1,0 +1,169 @@
+---
+title: "wrangling"
+output: html_document
+author: "Jae Yeon Kim"
+date: "`r Sys.Date()`"
+---
+
+# Import pkgs 
+
+```{r}
+if (!require(pacman)) install.packages("pacman")
+
+pacman::p_load(tidyverse, here, glue, estimatr, broom, purrr, ggsignif)
+
+source(here("functions", "utils.R"))
+
+ggplot2::theme_set(custom_theme(font_size = 13, width = 8, height = 6))
+```
+
+# Import data 
+
+```{r}
+# sampling frame data including covariates 
+sample_covars <- read_csv(here("raw_data", "sample_covars.csv"))
+
+# experiment data 
+exp <- read_csv(here("raw_data", "exp.csv"))
+```
+
+# Filter data
+
+```{r}
+df <- exp[-c(1:2),]
+
+nrow(df) # 5,764
+
+# drop test responses
+
+df <- df %>%
+  filter(!str_detect(RecipientEmail, "codeforamerica")) %>%
+  filter(consent == 1) # only consented 
+
+nrow(df) # 5,097 cases
+
+df %>%
+  filter(is.na(h_treatment_anxiety) & is.na(i_treatment_anxiety) &
+         is.na(h_treatment_safety) & is.na(i_treatment_safety) &
+         is.na(h_control) & is.na(i_control)) %>%
+  nrow() # 670 cases
+
+670/5097 # 13.1% 
+
+min(parse_number(df$`Duration (in seconds)`)) # minimum 3 minutes
+```
+
+```{r}
+# immigrant status 
+df_immigrant <- df %>%
+  filter(is.na(h_treatment_anxiety) & is.na(h_treatment_safety) & is.na(h_control)) 
+
+# homeless status 
+df_homeless <- df %>%
+  filter(is.na(i_treatment_anxiety) & is.na(i_treatment_safety) & is.na(i_control)) 
+```
+
+# Mutate data 
+
+```{r}
+df_immigrant <- df_immigrant %>%
+    mutate(condition = ifelse(is.na(i_control) & (!is.na(i_treatment_anxiety) | !is.na(i_treatment_safety)), "treatment", "control")) %>%
+    mutate(control = parse_number(i_control), 
+           t_anxiety = parse_number(i_treatment_anxiety), 
+           t_safety = parse_number(i_treatment_safety)) %>%
+    mutate(both_responded = ifelse(condition == "treatment" & (!is.na(t_anxiety) & !is.na(t_safety)), 1, 0)) %>%
+    mutate(t_index = ifelse(both_responded == 1, ((t_anxiety + t_safety) / 2), NA))
+
+df_homeless <- df_homeless %>%
+    mutate(condition = ifelse(is.na(h_control) & (!is.na(h_treatment_anxiety) | !is.na(h_treatment_safety)), "treatment", "control")) %>%
+    mutate(control = parse_number(h_control), 
+           t_anxiety = parse_number(h_treatment_anxiety), 
+           t_safety = parse_number(h_treatment_safety)) %>%
+    mutate(both_responded = ifelse(condition == "treatment" & (!is.na(t_anxiety) & !is.na(t_safety)), 1, 0)) %>%
+    mutate(t_index = ifelse(both_responded == 1, ((t_anxiety + t_safety) / 2), NA))
+```
+
+```{r}
+df_immigrant %>%
+  filter(condition == "treatment") %>%
+  summarize(pct_both_responded = mean(both_responded)) # 89%
+
+df_homeless %>%
+  filter(condition == "treatment") %>%
+  summarize(pct_both_responded = mean(both_responded)) # 92%
+```
+
+```{r}
+df_immigrant_long <- df_immigrant %>%
+  pivot_longer(cols = c(t_index, t_anxiety, t_safety, control), names_to = "variable", values_to = "value") %>%
+  select(variable, value) %>%
+  filter(!is.na(value)) 
+
+df_homeless_long <- df_homeless %>%
+  pivot_longer(cols = c(t_index, t_anxiety, t_safety, control), names_to = "variable", values_to = "value") %>%
+  select(variable, value) %>%
+  filter(!is.na(value)) 
+```
+
+# Difference in means 
+
+```{r}
+# Immigrant
+mean(df_immigrant$t_index, na.rm = T) # 2.86
+mean(df_immigrant$t_anxiety, na.rm = T) # 2.83
+mean(df_immigrant$t_safety, na.rm = T) # 2.86
+mean(df_immigrant$control, na.rm = T) # 2.68
+
+# Homeless
+mean(df_homeless$t_index, na.rm = T) # 2.69
+mean(df_homeless$t_anxiety, na.rm = T) # 2.69
+mean(df_homeless$t_safety, na.rm = T) # 2.7
+mean(df_homeless$control, na.rm = T) # 2.64
+```
+
+```{r}
+lm_immigrant <- lm_robust(value ~ factor(variable), data = df_immigrant_long) %>%
+  tidy(conf.int = T) %>%
+  filter(!str_detect(term, "Inter")) %>%
+  mutate(term = case_when(
+    str_detect(term, "anxiety") ~ "Anxiety",
+    str_detect(term, "safety") ~ "Safety",
+    str_detect(term, "index") ~ "Index"
+  )) %>%
+  mutate(term = factor(term, levels = c("Anxiety", "Safety", "Index"))) 
+
+lm_homeless <- lm_robust(value ~ factor(variable), data = df_homeless_long) %>%
+  tidy(conf.int = T) %>%
+  filter(!str_detect(term, "Inter")) %>%
+  mutate(term = case_when(
+    str_detect(term, "anxiety") ~ "Anxiety",
+    str_detect(term, "safety") ~ "Safety",
+    str_detect(term, "index") ~ "Index"
+  )) %>%
+  mutate(term = factor(term, levels = c("Anxiety", "Safety", "Index"))) 
+
+lm_mods <- bind_rows(mutate(lm_immigrant, Group = "Immigrant"), mutate(lm_homeless, Group = "Homeless"))
+```
+
+```{r}
+lm_plots <- lm_mods %>%
+  ggplot(aes(x = term, y = estimate, fill = Group)) +
+  geom_col(position = position_dodge()) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), 
+                position = position_dodge(width = 0.9), 
+                width = 0.25, 
+                col = "darkgrey") +
+  geom_text(aes(label = round(estimate, 2)), 
+            position = position_dodge(width = 0.9), 
+            vjust = -0.5, color = "red", size = 6) +
+  labs(x = "", y = "Estimated ATE (psychological burden)",
+       title = "List experiment results",
+       fill = "Sensitive item") +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+add_c4a_theme(lm_plots, legend_name = "Sensitive item")
+
+ggsave(here("outputs", "ate.png"), width = 8, height = 8)
+```
