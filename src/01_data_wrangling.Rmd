@@ -10,7 +10,7 @@ date: "`r Sys.Date()`"
 ```{r}
 if (!require(pacman)) install.packages("pacman")
 
-pacman::p_load(tidyverse, here, glue, estimatr, broom, purrr, ggsignif)
+pacman::p_load(tidyverse, here, glue, estimatr, broom, purrr, ggsignif, fixest, modelsummary)
 
 source(here("functions", "utils.R"))
 
@@ -25,6 +25,13 @@ sample_covars <- read_csv(here("raw_data", "sample_covars.csv"))
 
 # experiment data 
 exp <- read_csv(here("raw_data", "exp.csv"))
+
+exp_updated <- read_csv(here("raw_data", "exp_updated.csv"))
+
+nrow(exp)
+nrow(exp_updated)
+
+exp <- exp_updated
 ```
 
 # Filter data
@@ -122,7 +129,7 @@ mean(df_homeless$control, na.rm = T) # 2.64
 ```
 
 ```{r}
-lm_immigrant <- lm_robust(value ~ factor(variable), data = df_immigrant_long) %>%
+lm_immigrant <- feols(value ~ factor(variable), data = df_immigrant_long, vcov = "hetero") %>%
   tidy(conf.int = T) %>%
   filter(!str_detect(term, "Inter")) %>%
   mutate(term = case_when(
@@ -132,7 +139,7 @@ lm_immigrant <- lm_robust(value ~ factor(variable), data = df_immigrant_long) %>
   )) %>%
   mutate(term = factor(term, levels = c("Anxiety", "Safety", "Index"))) 
 
-lm_homeless <- lm_robust(value ~ factor(variable), data = df_homeless_long) %>%
+lm_homeless <- feols(value ~ factor(variable), data = df_homeless_long, vcov = "hetero") %>%
   tidy(conf.int = T) %>%
   filter(!str_detect(term, "Inter")) %>%
   mutate(term = case_when(
@@ -143,6 +150,11 @@ lm_homeless <- lm_robust(value ~ factor(variable), data = df_homeless_long) %>%
   mutate(term = factor(term, levels = c("Anxiety", "Safety", "Index"))) 
 
 lm_mods <- bind_rows(mutate(lm_immigrant, Group = "Immigrant"), mutate(lm_homeless, Group = "Homeless"))
+
+lm_mods_tables <- list(
+  "Immigrant status" = feols(value ~ factor(variable), data = df_immigrant_long, vcov = "hetero"),
+  "Homeless status" = feols(value ~ factor(variable), data = df_homeless_long, vcov = "hetero")
+)
 ```
 
 ```{r}
@@ -166,4 +178,17 @@ lm_plots <- lm_mods %>%
 add_c4a_theme(lm_plots, legend_name = "Sensitive item")
 
 ggsave(here("outputs", "ate.png"), width = 8, height = 8)
+```
+
+```{r}
+mad_cm <- c(
+  "factor(variable)t_anxiety" = "Anxiety", 
+  "factor(variable)t_safety" = "Safety",
+  "factor(variable)t_index" = "Index"
+)
+
+modelsummary(lm_mods_tables,
+             estimate = c("{estimate}{stars} \n [{conf.low}, {conf.high}] \n p = {p.value}"),
+             statistic = NULL,
+             coef_map = mad_cm)
 ```
