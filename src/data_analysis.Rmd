@@ -1,0 +1,354 @@
+---
+title: "wrangling"
+output: html_document
+author: "Jae Yeon Kim"
+date: "`r Sys.Date()`"
+---
+
+# Import pkgs 
+
+```{r}
+if (!require(pacman)) install.packages("pacman")
+
+pacman::p_load(tidyverse, here, glue, estimatr, broom, purrr, ggsignif, 
+               fixest, modelsummary,
+               tinytable,
+               list, # statistical analysis of list experiments
+               DACF, # for ceiling and or/floor data 
+               MKinfer, # for inferential statistics
+               nonpar) # for nonparametric inference
+
+source(here("functions", "utils.R"))
+
+ggplot2::theme_set(custom_theme(font_size = 13, width = 8, height = 6))
+```
+
+# Import data 
+
+```{r}
+# sampling frame data including covariates 
+sample_covars <- read_csv(here("raw_data", "sample_covars.csv"))
+```
+
+```{r}
+# experiment data 
+exp <- read_csv(here("raw_data", "exp.csv"))
+
+exp_updated <- read_csv(here("raw_data", "exp_updated.csv"))
+
+lookup_table <- read_csv(here("raw_data", "calfresh_responseid_lookup.csv"))
+
+nrow(exp)
+nrow(exp_updated)
+
+exp <- exp_updated
+```
+
+# Balance checks 
+
+```{r}
+datasummary_balance(~assignment, 
+    sample_covars %>%
+      select(-c("calfresh_application_id", "contact_method")) %>%
+      mutate(submitted_language = ifelse(submitted_language == "vi", NA, submitted_language)) %>%
+      mutate(across(where(is.logical), as.integer)) 
+    ) %>%
+    save_tt(here("outputs", "sample_balance_check.docx"), overwrite = T)
+```
+
+# Filter data
+
+```{r}
+df <- exp[-c(1:2),]
+
+nrow(df) # 6,234
+
+# drop test responses
+
+df <- df %>%
+  filter(!str_detect(RecipientEmail, "codeforamerica")) %>%
+  filter(consent == 1) # only consented 
+
+nrow(df) # 5,482 cases
+
+max(df$EndDate, na.rm = T)
+```
+
+```{r}
+df %>%
+  filter(is.na(h_treatment_anxiety) & is.na(i_treatment_anxiety) &
+         is.na(h_treatment_safety) & is.na(i_treatment_safety) &
+         is.na(h_control) & is.na(i_control)) %>%
+  nrow() # 948 cases
+
+948/5482 # 17% 
+
+min(parse_number(df$`Duration (in seconds)`)) # minimum 3 seconds
+
+df <- df %>%
+  filter(parse_number(df$`Duration (in seconds)`) > 5) 
+
+nrow(df)
+```
+# Combine the experimental outcomes with the covariates 
+
+```{r}
+sum(duplicated(lookup_table$response_id)) # 336 duplicated IDs # one email corresponds to multiple calfresh ids and potentially multiple conditions 
+
+df_covariates <- left_join(
+    df, lookup_table, 
+    by = c("ResponseId" = "response_id"),
+    multiple = "all") %>%
+    left_join(sample_covars, by = c("calfresh_application_id")) %>%
+    select(-calfresh_application_id) %>%
+    distinct()
+
+df_covariates <- df_covariates %>%
+  mutate(duplicated = ifelse(duplicated(ResponseId), 1, 0))
+
+(nrow(df_covariates) - nrow(df)) / nrow(df_covariates) # 4%
+```
+
+# Balance check again (this time experimental data)
+
+```{r}
+sam_vars <- names(sample_covars)
+
+datasummary_balance(~assignment, df_covariates %>%
+                      select(sam_vars[-1]) %>%
+      select(-c("contact_method")) %>%
+      mutate(submitted_language = ifelse(submitted_language == "vi", NA, submitted_language)) %>%
+      mutate(across(where(is.logical), as.integer)) 
+    ) %>%
+   save_tt(here("outputs", "exp_balance_check.docx"), overwrite = T)
+```
+
+# Differential non-response rates 
+
+```{r}
+unique(df_covariates$assignment)
+unique(df_covariates$group)
+```
+
+```{r}
+# immigrant status 
+df_immigrant_non <- df_covariates %>%
+  filter(group == "immigrant") %>%
+  mutate(non_response = ifelse(is.na(i_treatment_anxiety) & is.na(i_treatment_safety) & is.na(i_control), 1, 0))
+
+# homeless status 
+df_homeless_non <- df_covariates %>%
+  filter(group != "immigrant") %>%
+  mutate(non_response = ifelse(is.na(h_treatment_anxiety) & is.na(h_treatment_safety) & is.na(h_control), 1, 0))
+```
+
+```{r}
+lm_immigrant_non <- feols(non_response ~ factor(assignment), data = df_immigrant_non, vcov = "hetero") %>%
+  tidy(conf.int = T) %>%
+  filter(!str_detect(term, "Inter")) 
+
+lm_homeless_non <- feols(non_response ~ factor(assignment), data = df_homeless_non, vcov = "hetero") %>%
+  tidy(conf.int = T) %>%
+  filter(!str_detect(term, "Inter")) 
+
+lm_mods_non <- bind_rows(mutate(lm_immigrant_non, Group = "Immigrant"), mutate(lm_homeless_non, Group = "Homelessness"))
+```
+
+## Plot 
+
+```{r}
+lm_plots_non <- lm_mods_non %>%
+  mutate(term = c("")) %>%
+  ggplot(aes(x = term, y = estimate, fill = Group)) +
+  geom_col(position = position_dodge()) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), 
+                position = position_dodge(width = 0.9), 
+                width = 0.25, 
+                col = "darkgrey") +
+  geom_text(aes(label = round(estimate, 3)), 
+            position = position_dodge(width = 0.9), 
+            vjust = -0.5, color = "red", size = 6) +
+  labs(x = "Group", y = "Estimated ATE",
+       title = "Differential survey dropout rates",
+       fill = "Sensitive item") +
+  theme(legend.position = "bottom") 
+
+add_c4a_theme(lm_plots_non, legend_name = "Sensitive item")
+
+ggsave(here("outputs", "differential_non_response_rates.png"), width = 8, height = 8)
+```
+
+## Table
+
+```{r}
+lm_mods_non_tables <- list(
+  "Immigrant status" = feols(non_response ~ factor(assignment), data = df_immigrant_non, vcov = "hetero"),
+  "Immigrant status (removed duplicates)" = feols(non_response ~ factor(assignment), data = df_immigrant_non %>%
+                                                    filter(duplicated == 0), vcov = "hetero"),
+  "Homelessness status" = feols(non_response ~ factor(assignment), data = df_homeless_non, vcov = "hetero"),
+  "Homelessness status (removed duplicates)" = feols(non_response ~ factor(assignment), data = df_homeless_non %>%
+                                                       filter(duplicated == 0), vcov = "hetero")
+  )
+```
+
+```{r}
+modelsummary(lm_mods_non_tables,
+             estimate = c("{estimate}{stars} [{conf.low}, {conf.high}] <br> p = {p.value}"),
+             statistic = NULL,
+             output = "markdown") %>%
+  save_tt(here("outputs", "non_response__table.docx"), overwrite = T)
+```
+
+# ATE estimatino
+
+## Filter data
+
+```{r}
+# immigrant status 
+df_immigrant <- df %>%
+  filter(is.na(h_treatment_anxiety) & is.na(h_treatment_safety) & is.na(h_control)) 
+
+# homeless status 
+df_homeless <- df %>%
+  filter(is.na(i_treatment_anxiety) & is.na(i_treatment_safety) & is.na(i_control)) 
+
+df_immigrant <- df_immigrant %>%
+    mutate(condition = ifelse(is.na(i_control) & (!is.na(i_treatment_anxiety) | !is.na(i_treatment_safety)), "treatment", "control")) %>%
+    mutate(control = parse_number(i_control), 
+           t_anxiety = parse_number(i_treatment_anxiety), 
+           t_safety = parse_number(i_treatment_safety)) %>%
+    mutate(both_responded = ifelse(condition == "treatment" & (!is.na(t_anxiety) & !is.na(t_safety)), 1, 0)) %>%
+    mutate(t_index = ifelse(both_responded == 1, ((t_anxiety + t_safety) / 2), NA))
+
+df_homeless <- df_homeless %>%
+    mutate(condition = ifelse(is.na(h_control) & (!is.na(h_treatment_anxiety) | !is.na(h_treatment_safety)), "treatment", "control")) %>%
+    mutate(control = parse_number(h_control), 
+           t_anxiety = parse_number(h_treatment_anxiety), 
+           t_safety = parse_number(h_treatment_safety)) %>%
+    mutate(both_responded = ifelse(condition == "treatment" & (!is.na(t_anxiety) & !is.na(t_safety)), 1, 0)) %>%
+    mutate(t_index = ifelse(both_responded == 1, ((t_anxiety + t_safety) / 2), NA))
+```
+
+```{r}
+df_immigrant %>%
+  filter(condition == "treatment") %>%
+  summarize(pct_both_responded = mean(both_responded)) # 89%
+
+df_homeless %>%
+  filter(condition == "treatment") %>%
+  summarize(pct_both_responded = mean(both_responded)) # 92%
+```
+
+```{r}
+df_immigrant_long <- df_immigrant %>%
+  pivot_longer(cols = c(t_index, t_anxiety, t_safety, control), names_to = "variable", values_to = "value") %>%
+  select(variable, value) %>%
+  filter(!is.na(value)) 
+
+df_homeless_long <- df_homeless %>%
+  pivot_longer(cols = c(t_index, t_anxiety, t_safety, control), names_to = "variable", values_to = "value") %>%
+  select(variable, value) %>%
+  filter(!is.na(value)) 
+```
+
+```{r}
+df_immigrant %>%
+  filter(condition == "treatment") %>%
+  summarize(pct_both_responded = mean(both_responded)) %>%
+  round(2) # 88%
+
+df_homeless %>%
+  filter(condition == "treatment") %>%
+  summarize(pct_both_responded = mean(both_responded)) %>%
+  round(2) # 90%
+```
+
+```{r}
+df_immigrant_long <- df_immigrant %>%
+  pivot_longer(cols = c(t_index, t_anxiety, t_safety, control), names_to = "variable", values_to = "value") %>%
+  select(variable, value) %>%
+  filter(!is.na(value)) 
+
+df_homeless_long <- df_homeless %>%
+  pivot_longer(cols = c(t_index, t_anxiety, t_safety, control), names_to = "variable", values_to = "value") %>%
+  select(variable, value) %>%
+  filter(!is.na(value)) 
+
+nrow(df_homeless_long);
+nrow(df_immigrant_long)
+```
+
+## Difference in means 
+
+```{r}
+lm_immigrant <- feols(value ~ factor(variable), data = df_immigrant_long, vcov = "hetero") %>%
+  tidy(conf.int = T) %>%
+  filter(!str_detect(term, "Inter")) %>%
+  mutate(term = case_when(
+    str_detect(term, "anxiety") ~ "Anxiety",
+    str_detect(term, "safety") ~ "Safety",
+    str_detect(term, "index") ~ "Index"
+  )) %>%
+  mutate(term = factor(term, levels = c("Anxiety", "Safety", "Index"))) 
+
+lm_homeless <- feols(value ~ factor(variable), data = df_homeless_long, vcov = "hetero") %>%
+  tidy(conf.int = T) %>%
+  filter(!str_detect(term, "Inter")) %>%
+  mutate(term = case_when(
+    str_detect(term, "anxiety") ~ "Anxiety",
+    str_detect(term, "safety") ~ "Safety",
+    str_detect(term, "index") ~ "Index"
+  )) %>%
+  mutate(term = factor(term, levels = c("Anxiety", "Safety", "Index"))) 
+
+lm_mods <- bind_rows(mutate(lm_immigrant, Group = "Immigrant"), mutate(lm_homeless, Group = "Homelessness"))
+```
+
+## Plot 
+
+```{r}
+lm_plots <- lm_mods %>%
+  ggplot(aes(x = term, y = estimate, fill = Group)) +
+  geom_col(position = position_dodge()) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), 
+                position = position_dodge(width = 0.9), 
+                width = 0.25, 
+                col = "darkgrey") +
+  geom_text(aes(label = round(estimate, 3)), 
+            position = position_dodge(width = 0.9), 
+            vjust = -0.5, color = "red", size = 6) +
+  labs(x = "Measure", y = "Estimated ATE (psychological burden)",
+       title = "List experiment results",
+       fill = "Sensitive item") +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+add_c4a_theme(lm_plots, legend_name = "Sensitive item")
+
+ggsave(here("outputs", "ate.png"), width = 8, height = 8)
+```
+
+## Table 
+
+```{r}
+lm_mods_tables <- list(
+  "Immigrant status" = feols(value ~ factor(variable), data = df_immigrant_long, vcov = "hetero"),
+  "Homelessness status" = feols(value ~ factor(variable), data = df_homeless_long, vcov = "hetero")
+)
+
+mad_cm <- c(
+  "(Intercept)" = "Intercept (baseline)",
+  "factor(variable)t_anxiety" = "Anxiety", 
+  "factor(variable)t_safety" = "Safety",
+  "factor(variable)t_index" = "Indexed outcome"
+)
+```
+
+```{r}
+modelsummary(lm_mods_tables,
+             estimate = c("{estimate}{stars} [{conf.low}, {conf.high}] <br> p = {p.value}"),
+             statistic = NULL,
+             output = "markdown") %>%
+  save_tt(here("outputs", "ate_table.docx"), overwrite = T)
+```

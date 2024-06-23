@@ -1,0 +1,433 @@
+---
+title: "Sensitive question RCT"
+author: "Jae Yeon Kim"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+This project aims to assess the impact of asking sensitive questions on application completion rates using GCF data. We test these hypotheses using two list experiments targeting GCF applicants experiencing unstable housing situations or having a non-citizen family member. The sampling frame is limited to those who consent to receive emails or SMS texts.
+
+# import data 
+
+Only the last 2 years since the contact information in the older data would have been redacted by our privacy policy and DSA with the CDSS.
+
+We use the data collected from 2023-10-01 through 2024-04-29.
+
+```{sql}
+SELECT *
+FROM gcf_public.all_applications
+WHERE started_at >= '2023-10-01'
+AND 
+started_at <= '2024-04-29'
+```
+
+```{r}
+write_csv(df1, "df1.csv")
+```
+
+```{r}
+library(tidyverse)
+library(janitor)
+```
+
+```{r}
+df1 <- read_csv("df1.csv")
+```
+
+```{r}
+add_c4a_theme <- function(ggplot_obj, target = "fill", legend_name = "Legend") {
+
+  message("The current function only has 6 color choices.")
+
+  SN_LIGHT_GREEN <- "#00A88F"
+  SN_DEEP_GREEN <- "#006152"
+  SN_BLACK <- "#000000"
+  SN_DARK_BLUE <- "#2B1A78"
+
+  CFA_DARK_BLUE <- SN_DARK_BLUE
+  CFA_DEEP_GREEN <- SN_DEEP_GREEN
+  CFA_BLACK <- SN_BLACK
+
+  CFA_RICH_RED <- "#EA3C48"
+  CFA_LIGHT_BLUE <- "#A1B4EA"
+  CFA_WARM_YELLOW <- "#FFB446"
+  CFA_SAND <- "#E9CCBE"
+
+  color_theme <- c(CFA_LIGHT_BLUE, CFA_DARK_BLUE, SN_LIGHT_GREEN, SN_DEEP_GREEN, CFA_WARM_YELLOW, CFA_RICH_RED)
+
+  base <- ggplot_obj +
+    theme(
+      text = element_text(
+        size = 12,
+        family = "Helvetica Neue"
+      ),
+      axis.title.y = element_text(face = "bold", size = 12),
+      axis.title.x = element_text(face = "bold", size = 12),
+      axis.text.x = element_text(size = 10),
+      plot.title = element_text(face = "bold"),
+      legend.title = element_text(size = 11)
+    )
+
+  if (target == "fill") {
+    out <- base +
+      scale_fill_manual(name = legend_name, values = color_theme) # the legned is a default name. please feel free to change it.
+   }
+
+  if (target == "color") {
+    out <- base +
+      scale_color_manual(name = legend_name, values = color_theme) # the legned is a default name. please feel free to change it.
+  }
+
+  message(paste("cfa theme is applied to", target, "parameter.")) 
+
+  return(out)
+}
+```
+
+```{r}
+df1 <- df1 %>%
+    mutate(unstable_housing = ifelse(stable_housing == FALSE, TRUE, FALSE)) 
+```
+
+```{r}
+df1 %>%
+    filter(unstable_housing == TRUE | household_includes_noncitizen == TRUE) %>%
+    group_by(unstable_housing, household_includes_noncitizen) %>%
+    count() %>%
+    ungroup() %>%
+    mutate(freq = round(n/sum(n),2))
+```
+
+```{r}
+df1$opened_date <- as.Date(df1$started_at, format = "%m/%d/%Y")
+```
+
+```{r}
+df1 %>%
+    group_by(opened_date) %>%
+    count() %>%
+    ggplot(aes(x = opened_date, y = n)) +
+    geom_point() +
+    ylim(0, 10000) +
+    labs(x = "Application start date", 
+         y = "Count", 
+         caption = "GCF (2023.10.01-2024.4.29)")
+```
+
+```{r}
+df1 %>%
+    mutate(miss_housing_q = ifelse(is.na(stable_housing), "Didn't respond homeless Q", "Responded homeless Q")) %>%
+    group_by(miss_housing_q) %>%
+    summarize(
+        n = n(), 
+        dropoff_rate = mean(completed_application == FALSE, na.rm = TRUE),
+        lower_ci = mean(completed_application == FALSE, na.rm = TRUE) - qt(0.975, df = n() - 1) * sd(completed_application == FALSE, na.rm = TRUE) / sqrt(n()),
+        upper_ci = mean(completed_application == FALSE, na.rm = TRUE) + qt(0.975, df = n() - 1) * sd(completed_application == FALSE, na.rm = TRUE) / sqrt(n()),
+        .groups = 'drop'
+    )
+```
+
+```{r}
+df1 %>%
+    mutate(miss_imm_q = ifelse(is.na(household_includes_noncitizen), "Didn't respond non-citizen Q", "Responded non-citizen Q")) %>%
+    group_by(miss_imm_q) %>%
+    summarize(
+        n = n (),
+        dropoff_rate = mean(completed_application == FALSE, na.rm = TRUE),
+        lower_ci = mean(completed_application == FALSE, na.rm = TRUE) - qt(0.975, df = n() - 1) * sd(completed_application == FALSE, na.rm = TRUE) / sqrt(n()),
+        upper_ci = mean(completed_application == FALSE, na.rm = TRUE) + qt(0.975, df = n() - 1) * sd(completed_application == FALSE, na.rm = TRUE) / sqrt(n()),
+        .groups = 'drop'
+    )
+```
+
+```{r}
+df1 %>%
+    group_by(household_includes_noncitizen) %>%
+    summarize(
+        dropoff_rate = mean(completed_application == FALSE, na.rm = TRUE),
+        lower_ci = mean(completed_application == FALSE, na.rm = TRUE) - qt(0.975, df = n() - 1) * sd(completed_application == FALSE, na.rm = TRUE) / sqrt(n()),
+        upper_ci = mean(completed_application == FALSE, na.rm = TRUE) + qt(0.975, df = n() - 1) * sd(completed_application == FALSE, na.rm = TRUE) / sqrt(n())
+    )
+```
+
+{# housing #}
+    , case
+        when a.living_situation_couchsurfing
+            or a.living_situation_lives_in_vehicle
+            or a.living_situation_stays_in_shelter
+            or a.living_situation_on_the_streets
+            or a.living_situation_other
+        then false
+        when a.living_situation_rent_or_own
+            or a.living_situation_lives_on_campus
+        then true
+    end as stable_housing
+    
+```{r}
+df1_filtered <- df1 %>%
+    filter(stable_housing == FALSE | household_includes_noncitizen == TRUE)
+
+homeless_sample <- df1_filtered %>%
+    filter(stable_housing == FALSE & household_includes_noncitizen == FALSE) # only homeless
+
+noncitizen_sample <- df1_filtered %>%
+    filter(stable_housing == TRUE & household_includes_noncitizen == TRUE) # only noncitizen
+```
+
+# Sampling frame
+
+```{r}
+email_contact <- read_csv("members__filtered_by_created_at_and_email_address__sorted_by_created_at_descending_2024-04-29T18_18_06.310356Z.csv") %>%
+    clean_names() %>%
+    select(calfresh_application_id, email_address)
+
+phone_contact <- read_csv("members__filtered_by_phone_number__created_at__and_phone_number_type__sorted_by_created_at_descending_2024-04-29T18_18_32.982004Z.csv") %>%
+    clean_names() %>%
+    select(calfresh_application_id, phone_number)
+
+homeless_sample$calfresh_application_id <- as.character(homeless_sample$calfresh_application_id)
+
+email_contact$calfresh_application_id <- as.character(email_contact$calfresh_application_id)
+
+phone_contact$calfresh_application_id <- as.character(phone_contact$calfresh_application_id)
+
+noncitizen_sample$calfresh_application_id <- as.character(noncitizen_sample$calfresh_application_id)
+```
+
+```{r}
+homeless_sample <- homeless_sample %>%
+    left_join(email_contact) %>%
+    left_join(phone_contact) %>%
+    filter(!(is.na(email_address) & is.na(phone_number))) %>%
+    select(calfresh_application_id, email_address, phone_number, county_name)
+
+noncitizen_sample <- noncitizen_sample %>%
+    left_join(email_contact) %>%
+    left_join(phone_contact) %>%
+    filter(!(is.na(email_address) & is.na(phone_number))) %>%
+    select(calfresh_application_id, email_address, phone_number, submitted_language)
+```
+
+# Power analysis 
+
+Reference for the effect sizes (from table 4 in the following article): https://academic.oup.com/poq/article/77/S1/159/1878470 
+
+```{r}
+install.packages("pwr")
+library(pwr)
+
+# Install the pwr package if not already installed
+if (!requireNamespace("pwr", quietly = TRUE)) {
+  install.packages("pwr")
+}
+
+# Load the pwr package
+library(pwr)
+
+# Calculate the sample size
+# effect size = (0.03 + 0.1)/2, significance level alpha = 0.05
+sample_size <- pwr.t.test(d = (0.03 + 0.1)/2, 
+    sig.level = 0.05, 
+    power = 0.8, 
+    type = 'two.sample', 
+    alternative = 'two.sided')$n
+
+# Assume 10% response rate 
+target_size <- sample_size / 0.10
+
+target_size
+```
+
+```{r}
+paste0(target_size / round(nrow(homeless_sample), 2) * 100, "%", " of the GCF applicants experienced unstable housing");
+paste0(target_size / round(nrow(noncitizen_sample), 2) * 100, "%", " of the GCF applicants whose households include a noncitizen member")
+```
+
+"28.0726482791893% of the GCF applicants experienced unstable housing"
+"102.476080693776% of the GCF applicants whose households include a noncitizen member"
+
+
+# Sample selection
+
+```{r}
+# set seed for computational reproducibility
+set.seed(1234)
+
+homeless_sample %>%
+    group_by(county_name) %>%
+    count() %>%
+    ungroup() %>%
+    mutate(freq = n/sum(n)) %>%
+    arrange(desc(freq)) %>%
+    head(10)
+```
+
+We grouped the data to create a 30% random sample because there's a chance that applicants from top counties (e.g., Los Angeles, San Diego, and Riverside) will dominate the data.
+
+```{r}
+homeless_sample_filtered <- homeless_sample %>%
+  group_by(county_name) %>%
+  sample_frac(0.3)
+```
+
+46% of the GCF applicants submitted their applications written in Spanish.
+
+```{r}
+noncitizen_sample %>%
+    group_by(submitted_language) %>%
+    count() %>%
+    ungroup() %>%
+    mutate(freq = n/sum(n))
+```
+
+# Random assignment
+
+```{r}
+homeless_sample_filtered <- homeless_sample_filtered %>%
+    mutate(contact_method = case_when(
+        is.na(phone_number) & !is.na(email_address) ~ "email",
+        !is.na(phone_number) & is.na(email_address) ~ "phone",
+        !is.na(phone_number) & !is.na(email_address) ~ "both",
+        is.na(phone_number) & is.na(email_address) ~ "no_contact"
+    ))
+
+noncitizen_sample <- noncitizen_sample %>%
+    mutate(contact_method = case_when(
+        is.na(phone_number) & !is.na(email_address) ~ "email",
+        !is.na(phone_number) & is.na(email_address) ~ "phone",
+        !is.na(phone_number) & !is.na(email_address) ~ "both",
+        is.na(phone_number) & is.na(email_address) ~ "no_contact"
+    ))
+
+homeless_sample_filtered %>%
+    group_by(contact_method) %>%
+    count() %>%
+    ungroup() %>%
+    mutate(freq = n/sum(n))
+
+noncitizen_sample %>%
+    group_by(contact_method) %>%
+    count() %>%
+    ungroup() %>%
+    mutate(freq = n/sum(n))
+```
+
+```{r}
+if (!require(randomizr)) install.packages("randomizr") # for randomization 
+library(randomizr)
+```
+
+## Homeless blocked by contact method
+
+```{r}
+block_ra_homeless <- block_ra(
+    blocks = c(homeless_sample_filtered$contact_method), 
+    prob_each = c(0.5, 0.5), 
+    conditions = c("control", "treatment")
+)
+
+homeless_sample_filtered$conditions <- block_ra_homeless
+```
+
+## Noncitizen blocked by contact method
+
+```{r}
+block_ra_noncitizen <- block_ra(
+    blocks = c(noncitizen_sample$contact_method), 
+    prob_each = c(0.5, 0.5), 
+    conditions = c("control", "treatment")
+)
+
+noncitizen_sample$conditions <- block_ra_noncitizen
+```
+
+# Export files
+
+```{r}
+write_csv(homeless_sample_filtered, "homeless_sample.csv");
+write_csv(noncitizen_sample, "noncitizen_sample.csv")
+
+sample <- bind_rows(homeless_sample_filtered %>%
+    ungroup() %>%
+    select(-c("county_name")) %>%
+    mutate(group = "homeless"),
+    noncitizen_sample %>%
+    select(-c("submitted_language")) %>%
+    mutate(group = "immigrant")
+)
+
+sample <- sample %>%
+    rename(assignment = conditions)
+```
+
+```{r}
+write_csv(sample, "sample.csv")
+```
+
+# Balance checks
+
+```{r}
+install.packages("modelsummary")
+library(modelsummary)
+```
+
+```{r}
+sample_covars <- sample %>% 
+    select(c("calfresh_application_id", "contact_method", "assignment", "group")) %>%
+    left_join(
+        df1 %>%
+        select(c("calfresh_application_id", "age", "sex", "ssi", "county_name", "household_size", "eligible_household_size", "has_job", "self_employed", "student", "final_eligible_gross_income_amount", "final_eligible_net_income_amount", "submitted_language")),
+    by = c("calfresh_application_id"))
+
+datasummary_balance(~assignment, 
+    sample_covars %>%
+    select(-c("calfresh_application_id", "contact_method")) %>%
+    mutate(submitted_language = ifelse(submitted_language == "vi", NA, submitted_language))
+    ,
+    output = "DT")
+
+datasummary_balance(~assignment, 
+    sample_covars %>%
+    select(-c("calfresh_application_id", "contact_method"))
+    ,
+    output = "latex")
+```
+
+# Qualtrics setup
+
+We will send the invites to 75,987 GCF applicants.
+
+- 72,382 emails 
+- 68,126 SMS texts 
+
+replace NA emails with fake (madeup) emails 
+
+```{r}
+library(glue)
+
+pseudo_emails <- glue("{1:3605}listexp@gmail.com")
+
+sample$email_address[sample$contact_method == "phone"] <- pseudo_emails
+
+sample_augmented <- sample
+
+sample_augmented_test <- sample_augmented %>% 
+  group_by(contact_method, group, assignment) %>% 
+  sample_n(size = 1, replace = FALSE)
+
+sample_augmented_rest <- sample_augmented %>%
+    filter(!(calfresh_application_id %in% sample_augmented_test$calfresh_application_id))
+
+write_csv(sample_augmented, "sample_augmented.csv")
+
+sample_augmented_rest <- read.csv("sample_augmented_rest.csv");
+sample_augmented_test <- read.csv("sample_augmented_test.csv")
+
+sample_augmented_test <- sample_augmented_test %>%
+    mutate(phone_number = ifelse(!is.na(phone_number), paste0("1", phone_number), phone_number)) %>%
+    mutate(phone_number = ifelse(!is.na(phone_number), substr(phone_number, nchar(phone_number) - 10, nchar(phone_number)), phone_number))
+
+sample_augmented_rest <- sample_augmented_rest %>%
+    mutate(phone_number = ifelse(!is.na(phone_number), paste0("1", phone_number), phone_number)) %>%
+    mutate(phone_number = ifelse(!is.na(phone_number), substr(phone_number, nchar(phone_number) - 10, nchar(phone_number)), phone_number))
+```
